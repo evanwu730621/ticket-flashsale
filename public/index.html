@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高併發搶票系統測試台</title>
+    <!-- 使用 Tailwind CSS 快速美化 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen py-10 px-4">
+    <div class="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
+        <!-- 頂部標題區 -->
+        <div class="bg-gradient-to-r from-blue-600 to-indigo-700 p-6 text-white text-center">
+            <h1 class="text-3xl font-extrabold tracking-wide">⚡ 高併發搶票模擬器</h1>
+            <p class="text-blue-100 text-sm mt-1">PHP 8.3 + Redis 訊息佇列 + CLI Worker 架構</p>
+        </div>
+
+        <div class="p-6 space-y-6">
+            <!-- 票券資訊卡片 -->
+            <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 flex justify-between items-center">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-800">2026 搶先體驗演唱會門票</h2>
+                    <p class="text-slate-500 text-sm mt-1">活動 ID: <span class="font-mono font-semibold text-slate-700">1</span></p>
+                </div>
+                <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                    ● 火熱開搶中
+                </span>
+            </div>
+
+            <!-- 操作面板 -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-700 mb-1">你的使用者 ID (User ID)</label>
+                    <input type="number" id="userId" value="101" 
+                           class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-slate-800 font-mono">
+                    <p class="text-xs text-slate-400 mt-1">更換 ID 可模擬不同使用者購票</p>
+                </div>
+                <div class="flex items-end space-x-2">
+                    <button onclick="randomizeUser()" class="w-1/3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-sm font-semibold transition">
+                        隨機換人
+                    </button>
+                    <button onclick="buyTicket()" id="buyBtn" class="w-2/3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold transition flex items-center justify-center space-x-1 shadow-md">
+                        <span>立即搶票</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 壓力測試模擬按鈕 -->
+            <div class="pt-2 border-t border-slate-200">
+                <button onclick="simulateHighTraffic()" id="batchBtn" class="w-full py-2.5 bg-gradient-to-r from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 text-white font-bold rounded-lg transition shadow">
+                    🔥 一鍵模擬 10 人瞬間併發搶票
+                </button>
+            </div>
+
+            <!-- 即時狀態儀表板 -->
+            <div>
+                <h3 class="text-sm font-bold text-slate-700 mb-2">執行日誌與狀態：</h3>
+                <div id="logs" class="bg-slate-900 text-emerald-400 font-mono text-xs p-4 rounded-xl h-64 overflow-y-auto space-y-1 shadow-inner">
+                    <div class="text-slate-500">> 系統就緒，等待搶票請求...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function log(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const time = new Date().toLocaleTimeString();
+            let color = 'text-emerald-400';
+            if (type === 'error') color = 'text-red-400';
+            if (type === 'warn') color = 'text-amber-300';
+            if (type === 'process') color = 'text-cyan-300';
+
+            const item = document.createElement('div');
+            item.className = color;
+            item.innerHTML = `<span class="text-slate-600">[${time}]</span> ${message}`;
+            logs.appendChild(item);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function randomizeUser() {
+            const randomId = Math.floor(Math.random() * 9000) + 1000;
+            document.getElementById('userId').value = randomId;
+            log(`已切換為隨機使用者 ID: ${randomId}`);
+        }
+
+        async function buyTicket() {
+            const userId = parseInt(document.getElementById('userId').value, 10);
+            const btn = document.getElementById('buyBtn');
+
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+            log(`[發送請求] 使用者 ${userId} 正在搶票...`, 'process');
+
+            try {
+                // 1. 發送請求至 API (Redis Lua 阻擋併發並推入 Queue)
+                const res = await fetch('/api/ticket/buy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ticket_id: 1, user_id: userId })
+                });
+
+                const data = await res.json();
+
+                if (res.status === 202) {
+                    log(`✔ Redis 搶購受理！訂單號: ${data.order_sn} (已進入佇列削峰)`, 'info');
+                    // 2. 開始輪詢查詢 MySQL 狀態
+                    pollOrderStatus(data.order_sn, userId);
+                } else {
+                    log(`✖ 搶購被拒: ${data.message} (HTTP ${res.status})`, 'error');
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50');
+                }
+            } catch (err) {
+                log(`系統通訊失敗: ${err.message}`, 'error');
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            }
+        }
+
+        // 前端輪詢 Worker 落庫狀態
+        async function pollOrderStatus(orderSn, userId, attempt = 1) {
+            if (attempt > 10) {
+                log(`[訂單查詢逾時] 請稍後至個人中心查看`, 'warn');
+                document.getElementById('buyBtn').disabled = false;
+                document.getElementById('buyBtn').classList.remove('opacity-50');
+                return;
+            }
+
+            try {
+                const res = await fetch(`/api/ticket/order?order_sn=${orderSn}`);
+                const data = await res.json();
+
+                if (data.status === 'completed') {
+                    log(`🎉 [落庫成功] Worker 已將訂單 ${orderSn} 寫入 MySQL！搶票大成功！`, 'info');
+                    document.getElementById('buyBtn').disabled = false;
+                    document.getElementById('buyBtn').classList.remove('opacity-50');
+                } else {
+                    // 若還在隊列中，隔 400ms 再查一次
+                    setTimeout(() => pollOrderStatus(orderSn, userId, attempt + 1), 400);
+                }
+            } catch (err) {
+                setTimeout(() => pollOrderStatus(orderSn, userId, attempt + 1), 500);
+            }
+        }
+
+        // 模擬多使用者瞬間併發測試
+        async function simulateHighTraffic() {
+            const batchBtn = document.getElementById('batchBtn');
+            batchBtn.disabled = true;
+            batchBtn.classList.add('opacity-50');
+            log(`⚡ 正在同時發動 10 個搶票並發請求...`, 'warn');
+
+            const requests = [];
+            for (let i = 0; i < 10; i++) {
+                const fakeUserId = Math.floor(Math.random() * 8000) + 2000;
+                requests.push(
+                    fetch('/api/ticket/buy', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ticket_id: 1, user_id: fakeUserId })
+                    }).then(r => r.json().then(d => ({ status: r.status, data: d, user: fakeUserId })))
+                );
+            }
+
+            const results = await Promise.all(requests);
+            results.forEach(res => {
+                if (res.status === 202) {
+                    log(`[併發成功] 使用者 ${res.user} -> 搶到票，已排入佇列`, 'info');
+                } else {
+                    log(`[併發攔截] 使用者 ${res.user} -> ${res.data.message}`, 'error');
+                }
+            });
+
+            batchBtn.disabled = false;
+            batchBtn.classList.remove('opacity-50');
+        }
+    </script>
+</body>
+</html>
